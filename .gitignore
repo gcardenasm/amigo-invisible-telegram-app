@@ -1,0 +1,27 @@
+# Dependencias y compilación
+node_modules/
+dist/
+coverage/
+.vite/
+
+# Archivos de configuración local y secretos (nunca subir al repositorio)
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+wrangler.toml
+!wrangler.example.toml
+
+# Estado local y logs de Wrangler
+.wrangler/
+*.log
+npm-debug.log*
+
+# Sistema operativo y editores
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/

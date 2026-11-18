@@ -1,0 +1,15 @@
+name = "amigo-invisible-bot"
+main = "src/worker/index.ts"
+compatibility_date = "2025-05-01"
+
+[assets]
+directory = "./dist/web"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/webhook/*"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "amigo_invisible_db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"

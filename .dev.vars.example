@@ -1,0 +1,14 @@
+# Token obtenido en @BotFather
+BOT_TOKEN=123456789:REEMPLAZA_CON_TU_TOKEN
+
+# Nombre de usuario del bot sin @ (ej: MiAmigoInvisibleBot)
+BOT_USERNAME=MiAmigoInvisibleBot
+
+# URL pública HTTPS de tu Worker (ej: https://amigo-invisible-bot.tuusuario.workers.dev)
+WEBAPP_URL=https://amigo-invisible-bot.tuusuario.workers.dev
+
+# Secreto aleatorio para proteger el endpoint del webhook de Telegram
+WEBHOOK_SECRET=cambia-este-secreto-aleatorio
+
+# Solo para pruebas locales en navegador fuera de Telegram (dejar vacío o eliminar en producción)
+DEV_MODE=true

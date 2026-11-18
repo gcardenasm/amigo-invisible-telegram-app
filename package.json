@@ -1,0 +1,24 @@
+{
+  "name": "amigo-invisible-telegram-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:web": "vite",
+    "dev:worker": "wrangler dev --ip 127.0.0.1 --port 8787",
+    "build": "npm run build:web && npm run typecheck",
+    "build:web": "vite build",
+    "typecheck": "tsc -p tsconfig.worker.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "test": "vitest run",
+    "db:migrate:local": "wrangler d1 migrations apply amigo_invisible_db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply amigo_invisible_db --remote",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261117.1",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.1.3",
+    "wrangler": "^4.16.0"
+  }
+}
