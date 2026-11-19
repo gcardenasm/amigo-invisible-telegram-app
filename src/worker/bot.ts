@@ -9,10 +9,14 @@ import {
 import type { Env, TelegramUser } from './env';
 import {
   answerCallbackQuery,
+  answerInlineQuery,
+  buildInviteMessageHtml,
+  buildInviteStartAppUrl,
   escapeHtml,
   formatBudget,
   formatRevealDate,
-  sendTelegramMessage
+  sendTelegramMessage,
+  type InlineQueryArticle
 } from './telegram';
 
 interface TgUpdate {
@@ -42,6 +46,16 @@ interface TgUpdate {
       username?: string;
     };
     data?: string;
+  };
+  inline_query?: {
+    id: string;
+    from: {
+      id: number;
+      first_name: string;
+      last_name?: string;
+      username?: string;
+    };
+    query: string;
   };
 }
 
@@ -76,6 +90,59 @@ export async function handleTelegramWebhook(
 
   if (update.callback_query) {
     await answerCallbackQuery(env.BOT_TOKEN, update.callback_query.id);
+    return new Response('ok');
+  }
+
+  if (update.inline_query) {
+    const iq = update.inline_query;
+    const { results: userRooms } = await env.DB.prepare(
+      `SELECT r.* FROM rooms r
+       INNER JOIN participants p ON p.room_id = r.id
+       WHERE p.telegram_user_id = ?
+       ORDER BY r.updated_at DESC
+       LIMIT 10`
+    )
+      .bind(iq.from.id)
+      .all<RoomRow>();
+
+    const q = iq.query.trim().toLowerCase();
+    const filtered = q
+      ? userRooms.filter(
+          (r) => r.title.toLowerCase().includes(q) || r.code.toLowerCase().includes(q)
+        )
+      : userRooms;
+
+    const articles: InlineQueryArticle[] = filtered.map((r) => ({
+      type: 'article',
+      id: `room_${r.code}`,
+      title: `🎅 Invitar a «${r.title}»`,
+      description: `Máx: ${formatBudget(r.max_budget, r.currency)} · Día: ${formatRevealDate(
+        r.reveal_date
+      )}`,
+      input_message_content: {
+        message_text: buildInviteMessageHtml({
+          roomTitle: r.title,
+          maxBudget: r.max_budget,
+          currency: r.currency,
+          revealDate: r.reveal_date,
+          notes: r.notes
+        }),
+        parse_mode: 'HTML',
+        disable_web_page_preview: true
+      },
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: '🎁 Abrir y unirme al sorteo',
+              url: buildInviteStartAppUrl(env.BOT_USERNAME, `join_${r.code}`)
+            }
+          ]
+        ]
+      }
+    }));
+
+    await answerInlineQuery(env.BOT_TOKEN, iq.id, articles);
     return new Response('ok');
   }
 
@@ -199,10 +266,17 @@ export async function handleTelegramWebhook(
     const lines = [
       `🎅 <b>Tus sorteos de Amigo Invisible</b>`,
       '',
-      ...myRooms.map(
-        (r) =>
-          `• <b>${escapeHtml(r.title)}</b> (${r.status === 'drawn' ? '🎲 Sorteado' : '⏳ Abierto'} · ${escapeHtml(formatRevealDate(r.reveal_date))})`
-      ),
+      ...myRooms.map((r) => {
+        const label =
+          r.status === 'revealed'
+            ? '🎉 Revelado'
+            : r.status === 'drawn'
+            ? '🎲 Sorteado'
+            : '⏳ Abierto';
+        return `• <b>${escapeHtml(r.title)}</b> (${label} · ${escapeHtml(
+          formatRevealDate(r.reveal_date)
+        )})`;
+      }),
       '',
       'Toca un botón para entrar directamente:'
     ];
@@ -233,6 +307,7 @@ async function sendPendingAssignmentIfAny(env: Env, telegramUserId: number): Pro
     `SELECT p.*, r.id as r_id, r.code as r_code, r.title as r_title, r.max_budget as r_max_budget,
             r.currency as r_currency, r.reveal_date as r_reveal_date, r.notes as r_notes,
             r.organizer_tg_id as r_organizer_tg_id, r.status as r_status, r.drawn_at as r_drawn_at,
+            r.revealed_at as r_revealed_at, r.last_reminder_days as r_last_reminder_days,
             r.created_at as r_created_at, r.updated_at as r_updated_at
      FROM participants p
      INNER JOIN rooms r ON r.id = p.room_id
@@ -249,8 +324,10 @@ async function sendPendingAssignmentIfAny(env: Env, telegramUserId: number): Pro
         r_reveal_date: string;
         r_notes: string;
         r_organizer_tg_id: number;
-        r_status: 'open' | 'drawn';
+        r_status: 'open' | 'drawn' | 'revealed';
         r_drawn_at: string | null;
+        r_revealed_at: string | null;
+        r_last_reminder_days: number | null;
         r_created_at: string;
         r_updated_at: string;
       }
@@ -268,6 +345,8 @@ async function sendPendingAssignmentIfAny(env: Env, telegramUserId: number): Pro
       organizer_tg_id: row.r_organizer_tg_id,
       status: row.r_status,
       drawn_at: row.r_drawn_at,
+      revealed_at: row.r_revealed_at,
+      last_reminder_days: row.r_last_reminder_days,
       created_at: row.r_created_at,
       updated_at: row.r_updated_at
     };

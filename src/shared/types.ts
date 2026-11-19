@@ -1,4 +1,6 @@
-export type RoomStatus = 'open' | 'drawn';
+export type RoomStatus = 'open' | 'drawn' | 'revealed';
+
+export type GiftStatus = 'pending' | 'bought' | 'wrapped';
 
 export interface WishlistItemDto {
   id: string;
@@ -6,6 +8,18 @@ export interface WishlistItemDto {
   url: string;
   notes: string;
   createdAt: string;
+}
+
+export interface AnonymousMessageDto {
+  id: string;
+  senderRole: 'giver' | 'receiver';
+  body: string;
+  createdAt: string;
+}
+
+export interface RevealedPairDto {
+  giverName: string;
+  receiverName: string;
 }
 
 export interface ParticipantDto {
@@ -31,7 +45,11 @@ export interface SecretSantaTargetDto {
   participantId: string;
   displayName: string;
   telegramUsername: string | null;
+  sizes: string;
+  allergies: string;
+  dislikes: string;
   wishlist: WishlistItemDto[];
+  chatMessages: AnonymousMessageDto[];
 }
 
 export interface RoomSummaryDto {
@@ -44,9 +62,11 @@ export interface RoomSummaryDto {
   notes: string;
   status: RoomStatus;
   participantCount: number;
+  giftsReadyCount: number;
   isOrganizer: boolean;
   myBotReachable: boolean;
   drawnAt: string | null;
+  revealedAt: string | null;
 }
 
 export interface RoomDetailDto {
@@ -55,11 +75,17 @@ export interface RoomDetailDto {
     participantId: string;
     displayName: string;
     botReachable: boolean;
+    sizes: string;
+    allergies: string;
+    dislikes: string;
+    giftStatus: GiftStatus;
     wishlist: WishlistItemDto[];
   };
   participants: ParticipantDto[];
   exclusions: ExclusionDto[];
   myTarget: SecretSantaTargetDto | null;
+  santaMessages: AnonymousMessageDto[];
+  revealedPairs: RevealedPairDto[] | null;
   botUsername: string;
 }
 

@@ -1,6 +1,9 @@
 import type {
+  AnonymousMessageDto,
   ExclusionDto,
+  GiftStatus,
   ParticipantDto,
+  RevealedPairDto,
   RoomDetailDto,
   RoomStatus,
   RoomSummaryDto,
@@ -11,6 +14,7 @@ import type { Env, TelegramUser } from './env';
 import {
   buildAssignmentMessageHtml,
   escapeHtml,
+  normalizeBotUsername,
   sendTelegramMessage,
   type InlineButton
 } from './telegram';
@@ -74,6 +78,8 @@ export interface RoomRow {
   organizer_tg_id: number;
   status: RoomStatus;
   drawn_at: string | null;
+  revealed_at: string | null;
+  last_reminder_days: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -89,6 +95,17 @@ export interface ParticipantRow {
   is_organizer: number;
   assigned_to_id: string | null;
   notified_at: string | null;
+  sizes: string;
+  allergies: string;
+  dislikes: string;
+  gift_status: GiftStatus;
+  created_at: string;
+}
+
+interface AnonymousMessageRow {
+  id: string;
+  sender_role: 'giver' | 'receiver';
+  body: string;
   created_at: string;
 }
 
@@ -206,6 +223,9 @@ export async function sendAssignmentDm(
     currency: room.currency,
     revealDate: room.reveal_date,
     notes: room.notes,
+    sizes: target.sizes,
+    allergies: target.allergies,
+    dislikes: target.dislikes,
     wishlist,
     isRedraw
   });
@@ -448,18 +468,71 @@ export async function buildRoomDetailDto(
     excludedReceiverId: e.excluded_receiver_id
   }));
 
+  const giftsReadyCount = participantRows.filter(
+    (p) => p.gift_status === 'bought' || p.gift_status === 'wrapped'
+  ).length;
+
+  const isPostDraw = room.status === 'drawn' || room.status === 'revealed';
+
+  async function loadPairMessages(
+    giverId: string,
+    receiverId: string
+  ): Promise<AnonymousMessageDto[]> {
+    const { results } = await env.DB.prepare(
+      `SELECT id, sender_role, body, created_at
+       FROM anonymous_messages
+       WHERE room_id = ? AND giver_id = ? AND receiver_id = ?
+       ORDER BY created_at ASC`
+    )
+      .bind(room.id, giverId, receiverId)
+      .all<AnonymousMessageRow>();
+
+    return results.map((m) => ({
+      id: m.id,
+      senderRole: m.sender_role,
+      body: m.body,
+      createdAt: m.created_at
+    }));
+  }
+
   let myTarget: RoomDetailDto['myTarget'] = null;
-  if (room.status === 'drawn' && me.assigned_to_id) {
+  if (isPostDraw && me.assigned_to_id) {
     const targetRow = participantRows.find((p) => p.id === me.assigned_to_id);
     if (targetRow) {
-      const targetWishlist = await getWishlistForParticipant(env.DB, targetRow.id);
+      const [targetWishlist, chatMessages] = await Promise.all([
+        getWishlistForParticipant(env.DB, targetRow.id),
+        loadPairMessages(me.id, targetRow.id)
+      ]);
       myTarget = {
         participantId: targetRow.id,
         displayName: targetRow.display_name,
         telegramUsername: targetRow.telegram_username,
-        wishlist: targetWishlist
+        sizes: targetRow.sizes ?? '',
+        allergies: targetRow.allergies ?? '',
+        dislikes: targetRow.dislikes ?? '',
+        wishlist: targetWishlist,
+        chatMessages
       };
     }
+  }
+
+  let santaMessages: AnonymousMessageDto[] = [];
+  if (isPostDraw) {
+    const mySanta = participantRows.find((p) => p.assigned_to_id === me.id);
+    if (mySanta) {
+      santaMessages = await loadPairMessages(mySanta.id, me.id);
+    }
+  }
+
+  let revealedPairs: RevealedPairDto[] | null = null;
+  if (room.status === 'revealed') {
+    const byId = new Map(participantRows.map((p) => [p.id, p]));
+    revealedPairs = participantRows
+      .filter((p) => p.assigned_to_id && byId.has(p.assigned_to_id))
+      .map((p) => ({
+        giverName: p.display_name,
+        receiverName: byId.get(p.assigned_to_id!)!.display_name
+      }));
   }
 
   const summary: RoomSummaryDto = {
@@ -472,9 +545,11 @@ export async function buildRoomDetailDto(
     notes: room.notes,
     status: room.status,
     participantCount: participantRows.length,
+    giftsReadyCount,
     isOrganizer,
     myBotReachable: me.bot_reachable === 1,
-    drawnAt: room.drawn_at
+    drawnAt: room.drawn_at,
+    revealedAt: room.revealed_at
   };
 
   return {
@@ -483,13 +558,64 @@ export async function buildRoomDetailDto(
       participantId: me.id,
       displayName: me.display_name,
       botReachable: me.bot_reachable === 1,
+      sizes: me.sizes ?? '',
+      allergies: me.allergies ?? '',
+      dislikes: me.dislikes ?? '',
+      giftStatus: me.gift_status || 'pending',
       wishlist: myWishlist
     },
     participants,
     exclusions,
     myTarget,
-    botUsername: env.BOT_USERNAME
+    santaMessages,
+    revealedPairs,
+    botUsername: normalizeBotUsername(env.BOT_USERNAME)
   };
+}
+
+export async function notifyGiverOfPreferencesChange(
+  env: Env,
+  room: RoomRow,
+  receiver: ParticipantRow
+): Promise<void> {
+  if (room.status !== 'drawn') return;
+
+  const giver = await env.DB.prepare(
+    'SELECT * FROM participants WHERE room_id = ? AND assigned_to_id = ?'
+  )
+    .bind(room.id, receiver.id)
+    .first<ParticipantRow>();
+
+  if (!giver || !giver.telegram_user_id) return;
+
+  const lines = [
+    `📝 <b>¡Preferencias actualizadas!</b>`,
+    '',
+    `<b>${escapeHtml(receiver.display_name)}</b> ha actualizado su perfil de gustos (tallas, alergias o qué evitar) para <b>«${escapeHtml(room.title)}»</b>.`,
+    ''
+  ];
+  if (receiver.sizes.trim()) {
+    lines.push(`📏 <b>Tallas:</b> ${escapeHtml(receiver.sizes.trim())}`);
+  }
+  if (receiver.allergies.trim()) {
+    lines.push(`⚠️ <b>Alergias:</b> ${escapeHtml(receiver.allergies.trim())}`);
+  }
+  if (receiver.dislikes.trim()) {
+    lines.push(`🚫 <b>Evitar / No regalar:</b> ${escapeHtml(receiver.dislikes.trim())}`);
+  }
+
+  const res = await sendTelegramMessage(
+    env.BOT_TOKEN,
+    giver.telegram_user_id,
+    lines.join('\n'),
+    buildStartAppButton(env, '👀 Ver en la Mini App', `join_${room.code}`)
+  );
+
+  if (res.ok) {
+    await updateBotReachability(env.DB, giver.telegram_user_id, true);
+  } else if (res.blocked) {
+    await updateBotReachability(env.DB, giver.telegram_user_id, false);
+  }
 }
 
 export async function notifyGiverOfWishlistChange(

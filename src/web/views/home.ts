@@ -1,6 +1,12 @@
+import { computeDaysUntilReveal, formatCountdownLabel } from '../../shared/countdown';
 import type { RoomSummaryDto } from '../../shared/types';
 import { api, type MeResponse } from '../api';
-import { DEV_PROFILES, getActiveDevProfile, setActiveDevProfile } from '../telegram-sdk';
+import {
+  DEV_PROFILES,
+  getActiveDevProfile,
+  hapticNotification,
+  setActiveDevProfile
+} from '../telegram-sdk';
 import { attachAccessibleValidation, validateAndFocusFirstInvalid } from '../validation';
 import {
   activateBotMessages,
@@ -54,22 +60,41 @@ export async function renderHomeView(
       : `
       <div class="list" role="list">
         ${rooms
-          .map(
-            (r: RoomSummaryDto) => `
+          .map((r: RoomSummaryDto) => {
+            const countdown = formatCountdownLabel(computeDaysUntilReveal(r.revealDate));
+            const statusClass =
+              r.status === 'open' ? 'badge-warn' : 'badge-success';
+            const statusLabel =
+              r.status === 'revealed'
+                ? '🎉 Revelado'
+                : r.status === 'drawn'
+                ? '🎲 Sorteado'
+                : '⏳ Abierto';
+            const progressText =
+              r.status === 'drawn'
+                ? ` · 🎁 ${r.giftsReadyCount}/${r.participantCount} listos`
+                : '';
+
+            return `
           <button type="button" class="room-card-btn" data-open-room="${escapeHtml(r.code)}">
             <div class="room-card-info">
               <div class="list-item-title">${escapeHtml(r.title)}</div>
               <div class="muted">
                 💰 ${escapeHtml(formatBudget(r.maxBudget, r.currency))} · 📅 ${escapeHtml(
               formatRevealDate(r.revealDate)
-            )} · 👥 ${r.participantCount}
+            )} · 👥 ${r.participantCount}${progressText}
               </div>
+              ${
+                countdown
+                  ? `<div class="muted" style="font-size:0.8rem;">${escapeHtml(countdown)}</div>`
+                  : ''
+              }
             </div>
-            <span class="badge ${r.status === 'drawn' ? 'badge-success' : 'badge-warn'}">
-              ${r.status === 'drawn' ? '🎲 Sorteado' : '⏳ Abierto'}
+            <span class="badge ${statusClass}">
+              ${statusLabel}
             </span>
-          </button>`
-          )
+          </button>`;
+          })
           .join('')}
       </div>`;
 
@@ -151,6 +176,7 @@ export async function renderHomeView(
       mode: 'create',
       onSubmit: async (values) => {
         const res = await api.createRoom(values);
+        hapticNotification('success');
         showToast('🎉 Sorteo creado');
         navigateToRoom(res.code);
       }
@@ -174,9 +200,11 @@ export async function renderHomeView(
     joinBtn.disabled = true;
     try {
       const res = await api.joinRoom({ roomCode: code });
+      hapticNotification('success');
       showToast('🎉 Te has unido al sorteo');
       navigateToRoom(res.code);
     } catch (err) {
+      hapticNotification('error');
       showToast(err instanceof Error ? err.message : 'No se pudo entrar al sorteo');
       joinBtn.disabled = false;
     }

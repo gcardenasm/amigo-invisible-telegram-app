@@ -21,6 +21,12 @@ export interface TgWebApp {
   openTelegramLink(url: string): void;
   openLink(url: string): void;
   requestWriteAccess?(callback?: (allowed: boolean) => void): void;
+  shareMessage?(msgId: string, callback?: (sent: boolean) => void): void;
+  HapticFeedback?: {
+    impactOccurred(style: 'light' | 'medium' | 'heavy' | 'rigid' | 'soft'): void;
+    notificationOccurred(type: 'error' | 'success' | 'warning'): void;
+    selectionChanged(): void;
+  };
   onEvent?(eventType: string, callback: () => void): void;
 }
 
@@ -142,6 +148,16 @@ export function openExternalUrl(url: string): void {
   }
 }
 
+export function normalizeBotUsernameClient(raw: string): string {
+  const cleaned =
+    raw
+      .trim()
+      .replace(/^https?:\/\/t\.me\//i, '')
+      .replace(/^t\.me\//i, '')
+      .split(/[/?#]/)[0] ?? '';
+  return cleaned.replace(/^@+/, '').trim();
+}
+
 export function requestBotWriteAccess(): Promise<boolean> {
   return new Promise((resolve) => {
     const wa = window.Telegram?.WebApp;
@@ -156,4 +172,49 @@ export function requestBotWriteAccess(): Promise<boolean> {
     }
     resolve(false);
   });
+}
+
+export function sharePreparedTelegramMessage(
+  preparedMessageId: string
+): Promise<'sent' | 'cancelled' | 'unsupported'> {
+  return new Promise((resolve) => {
+    const wa = window.Telegram?.WebApp;
+    if (!wa?.shareMessage) {
+      resolve('unsupported');
+      return;
+    }
+    try {
+      wa.shareMessage(preparedMessageId, (sent) => {
+        resolve(sent ? 'sent' : 'cancelled');
+      });
+    } catch {
+      resolve('unsupported');
+    }
+  });
+}
+
+export function hapticImpact(
+  style: 'light' | 'medium' | 'heavy' | 'rigid' | 'soft' = 'light'
+): void {
+  try {
+    window.Telegram?.WebApp?.HapticFeedback?.impactOccurred(style);
+  } catch {
+    // ignore outside Telegram
+  }
+}
+
+export function hapticNotification(type: 'error' | 'success' | 'warning'): void {
+  try {
+    window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred(type);
+  } catch {
+    // ignore outside Telegram
+  }
+}
+
+export function hapticSelection(): void {
+  try {
+    window.Telegram?.WebApp?.HapticFeedback?.selectionChanged();
+  } catch {
+    // ignore outside Telegram
+  }
 }

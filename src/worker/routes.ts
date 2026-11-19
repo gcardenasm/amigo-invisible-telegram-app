@@ -1,10 +1,11 @@
 import { computeSecretSantaDraw } from '../shared/draw';
-import type { RoomSummaryDto } from '../shared/types';
+import type { GiftStatus, RoomSummaryDto } from '../shared/types';
 import { authenticateRequest, formatDisplayName } from './auth';
 import {
   buildRoomDetailDto,
   buildStartAppButton,
   joinRoomOrClaimSlot,
+  notifyGiverOfPreferencesChange,
   notifyGiverOfWishlistChange,
   randomCode,
   randomId,
@@ -16,7 +17,16 @@ import {
   type RoomRow
 } from './db';
 import type { Env, TelegramUser } from './env';
-import { escapeHtml, formatRevealDate, sendTelegramMessage } from './telegram';
+import {
+  buildInviteMessageHtml,
+  buildInviteStartAppUrl,
+  buildRevealSummaryHtml,
+  escapeHtml,
+  formatRevealDate,
+  normalizeBotUsername,
+  savePreparedInlineMessage,
+  sendTelegramMessage
+} from './telegram';
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -86,7 +96,7 @@ export async function handleApiRequest(
         displayName: formatDisplayName(user),
         username: user.username ?? null
       },
-      botUsername: env.BOT_USERNAME,
+      botUsername: normalizeBotUsername(env.BOT_USERNAME),
       botReachable,
       devMode: env.DEV_MODE === 'true'
     });
@@ -110,6 +120,7 @@ export async function handleApiRequest(
         `SELECT p.*, r.code as r_code, r.title as r_title, r.max_budget as r_max_budget,
                 r.currency as r_currency, r.reveal_date as r_reveal_date, r.notes as r_notes,
                 r.organizer_tg_id as r_organizer_tg_id, r.status as r_status, r.drawn_at as r_drawn_at,
+                r.revealed_at as r_revealed_at, r.last_reminder_days as r_last_reminder_days,
                 r.created_at as r_created_at, r.updated_at as r_updated_at
          FROM participants p
          INNER JOIN rooms r ON r.id = p.room_id
@@ -125,8 +136,10 @@ export async function handleApiRequest(
             r_reveal_date: string;
             r_notes: string;
             r_organizer_tg_id: number;
-            r_status: 'open' | 'drawn';
+            r_status: 'open' | 'drawn' | 'revealed';
             r_drawn_at: string | null;
+            r_revealed_at: string | null;
+            r_last_reminder_days: number | null;
             r_created_at: string;
             r_updated_at: string;
           }
@@ -146,6 +159,8 @@ export async function handleApiRequest(
             organizer_tg_id: row.r_organizer_tg_id,
             status: row.r_status,
             drawn_at: row.r_drawn_at,
+            revealed_at: row.r_revealed_at,
+            last_reminder_days: row.r_last_reminder_days,
             created_at: row.r_created_at,
             updated_at: row.r_updated_at
           },
@@ -167,14 +182,22 @@ export async function handleApiRequest(
     await upsertKnownBotUser(env.DB, user, false);
     const { results } = await env.DB.prepare(
       `SELECT r.*, p.is_organizer as me_org, p.bot_reachable as me_bot,
-              (SELECT COUNT(*) FROM participants p2 WHERE p2.room_id = r.id) as participant_count
+              (SELECT COUNT(*) FROM participants p2 WHERE p2.room_id = r.id) as participant_count,
+              (SELECT COUNT(*) FROM participants p3 WHERE p3.room_id = r.id AND p3.gift_status IN ('bought', 'wrapped')) as gifts_ready_count
        FROM rooms r
        INNER JOIN participants p ON p.room_id = r.id
        WHERE p.telegram_user_id = ?
        ORDER BY r.reveal_date ASC, r.created_at DESC`
     )
       .bind(user.id)
-      .all<RoomRow & { me_org: number; me_bot: number; participant_count: number }>();
+      .all<
+        RoomRow & {
+          me_org: number;
+          me_bot: number;
+          participant_count: number;
+          gifts_ready_count: number;
+        }
+      >();
 
     const rooms: RoomSummaryDto[] = results.map((r) => ({
       id: r.id,
@@ -186,9 +209,11 @@ export async function handleApiRequest(
       notes: r.notes,
       status: r.status,
       participantCount: r.participant_count,
+      giftsReadyCount: r.gifts_ready_count,
       isOrganizer: r.organizer_tg_id === user.id || r.me_org === 1,
       myBotReachable: r.me_bot === 1,
-      drawnAt: r.drawn_at
+      drawnAt: r.drawn_at,
+      revealedAt: r.revealed_at
     }));
 
     return json({ rooms });
@@ -323,12 +348,22 @@ export async function handleApiRequest(
       return badRequest('El importe máximo debe ser positivo.');
     }
 
+    const nextReminderReset = revealDate !== room.reveal_date ? null : room.last_reminder_days;
     await env.DB.prepare(
       `UPDATE rooms
-       SET title = ?, max_budget = ?, currency = ?, reveal_date = ?, notes = ?, updated_at = ?
+       SET title = ?, max_budget = ?, currency = ?, reveal_date = ?, notes = ?, last_reminder_days = ?, updated_at = ?
        WHERE id = ?`
     )
-      .bind(title, maxBudget, currency, revealDate, notes, new Date().toISOString(), room.id)
+      .bind(
+        title,
+        maxBudget,
+        currency,
+        revealDate,
+        notes,
+        nextReminderReset,
+        new Date().toISOString(),
+        room.id
+      )
       .run();
 
     return json({ ok: true });
@@ -339,7 +374,16 @@ export async function handleApiRequest(
     if (!isOrganizer) {
       return badRequest('Solo quien organiza puede eliminar el sorteo.', 403);
     }
-    await env.DB.prepare('DELETE FROM rooms WHERE id = ?').bind(room.id).run();
+    await env.DB.batch([
+      env.DB.prepare('UPDATE participants SET assigned_to_id = NULL WHERE room_id = ?').bind(
+        room.id
+      ),
+      env.DB.prepare('DELETE FROM anonymous_messages WHERE room_id = ?').bind(room.id),
+      env.DB.prepare('DELETE FROM exclusions WHERE room_id = ?').bind(room.id),
+      env.DB.prepare('DELETE FROM wishlist_items WHERE room_id = ?').bind(room.id),
+      env.DB.prepare('DELETE FROM participants WHERE room_id = ?').bind(room.id),
+      env.DB.prepare('DELETE FROM rooms WHERE id = ?').bind(room.id)
+    ]);
     return json({ ok: true });
   }
 
@@ -348,7 +392,7 @@ export async function handleApiRequest(
     if (!isOrganizer) {
       return badRequest('Solo quien organiza puede añadir participantes manualmente.', 403);
     }
-    if (room.status === 'drawn') {
+    if (room.status !== 'open') {
       return badRequest('El sorteo ya se ha realizado. Para añadir participantes, vuelve a abrir o re-sortear primero.', 409);
     }
 
@@ -401,16 +445,31 @@ export async function handleApiRequest(
     if (!isOrganizer) {
       return badRequest('Solo quien organiza puede eliminar participantes.', 403);
     }
-    if (room.status === 'drawn') {
+    if (room.status !== 'open') {
       return badRequest('No puedes eliminar participantes con el sorteo ya cerrado.', 409);
     }
     const targetId = participantDeleteMatch[1]!;
     if (targetId === me.id) {
       return badRequest('No puedes eliminarte a ti mismo siendo organizador.');
     }
-    await env.DB.prepare('DELETE FROM participants WHERE id = ? AND room_id = ? AND is_organizer = 0')
-      .bind(targetId, room.id)
-      .run();
+    await env.DB.batch([
+      env.DB.prepare(
+        'UPDATE participants SET assigned_to_id = NULL WHERE room_id = ? AND assigned_to_id = ?'
+      ).bind(room.id, targetId),
+      env.DB.prepare(
+        'DELETE FROM anonymous_messages WHERE room_id = ? AND (giver_id = ? OR receiver_id = ?)'
+      ).bind(room.id, targetId, targetId),
+      env.DB.prepare(
+        'DELETE FROM exclusions WHERE room_id = ? AND (giver_id = ? OR excluded_receiver_id = ?)'
+      ).bind(room.id, targetId, targetId),
+      env.DB.prepare('DELETE FROM wishlist_items WHERE room_id = ? AND participant_id = ?').bind(
+        room.id,
+        targetId
+      ),
+      env.DB.prepare(
+        'DELETE FROM participants WHERE id = ? AND room_id = ? AND is_organizer = 0'
+      ).bind(targetId, room.id)
+    ]);
     return json({ ok: true });
   }
 
@@ -505,7 +564,7 @@ export async function handleApiRequest(
     if (!isOrganizer) {
       return badRequest('Solo quien organiza puede configurar exclusiones.', 403);
     }
-    if (room.status === 'drawn') {
+    if (room.status !== 'open') {
       return badRequest('No puedes cambiar exclusiones con el sorteo ya realizado sin re-sortear.', 409);
     }
 
@@ -560,7 +619,7 @@ export async function handleApiRequest(
     if (!isOrganizer) {
       return badRequest('Solo quien organiza puede eliminar exclusiones.', 403);
     }
-    if (room.status === 'drawn') {
+    if (room.status !== 'open') {
       return badRequest('El sorteo ya está realizado.', 409);
     }
     await env.DB.prepare('DELETE FROM exclusions WHERE id = ? AND room_id = ?')
@@ -573,6 +632,9 @@ export async function handleApiRequest(
   if (method === 'POST' && subpath === '/draw') {
     if (!isOrganizer) {
       return badRequest('Solo quien organiza puede realizar el sorteo.', 403);
+    }
+    if (room.status === 'revealed') {
+      return badRequest('Este sorteo ya se ha revelado definitivamente.', 409);
     }
 
     const body = await parseBody<{ redraw?: boolean }>(request);
@@ -608,24 +670,33 @@ export async function handleApiRequest(
     const now = new Date().toISOString();
     const updates: D1PreparedStatement[] = [
       env.DB.prepare(
-        "UPDATE rooms SET status = 'drawn', drawn_at = ?, updated_at = ? WHERE id = ?"
-      ).bind(now, now, room.id)
+        "UPDATE rooms SET status = 'drawn', drawn_at = ?, revealed_at = NULL, last_reminder_days = NULL, updated_at = ? WHERE id = ?"
+      ).bind(now, now, room.id),
+      env.DB.prepare('DELETE FROM anonymous_messages WHERE room_id = ?').bind(room.id)
     ];
 
     for (const p of participants) {
       const targetId = drawResult.assignments[p.id]!;
       updates.push(
         env.DB.prepare(
-          'UPDATE participants SET assigned_to_id = ?, notified_at = NULL WHERE id = ?'
+          "UPDATE participants SET assigned_to_id = ?, notified_at = NULL, gift_status = 'pending' WHERE id = ?"
         ).bind(targetId, p.id)
       );
       p.assigned_to_id = targetId;
       p.notified_at = null;
+      p.gift_status = 'pending';
     }
 
     await env.DB.batch(updates);
 
-    const updatedRoom: RoomRow = { ...room, status: 'drawn', drawn_at: now, updated_at: now };
+    const updatedRoom: RoomRow = {
+      ...room,
+      status: 'drawn',
+      drawn_at: now,
+      revealed_at: null,
+      last_reminder_days: null,
+      updated_at: now
+    };
     let notifiedCount = 0;
     const pendingParticipants: string[] = [];
 
@@ -709,6 +780,294 @@ export async function handleApiRequest(
     }
 
     return json({ sentCount, unreachableNames });
+  }
+
+  // POST /api/rooms/:code/share-message
+  if (method === 'POST' && subpath === '/share-message') {
+    const body = await parseBody<{ claimToken?: string }>(request);
+    const claimToken = body?.claimToken?.trim();
+
+    let startParam = `join_${room.code}`;
+    let recipientName: string | undefined;
+    let buttonText = '🎁 Abrir y unirme al sorteo';
+
+    if (claimToken && isOrganizer) {
+      const slot = await env.DB.prepare(
+        'SELECT display_name FROM participants WHERE room_id = ? AND claim_token = ?'
+      )
+        .bind(room.id, claimToken)
+        .first<{ display_name: string }>();
+      if (slot) {
+        startParam = `claim_${claimToken}`;
+        recipientName = slot.display_name;
+        buttonText = '🎁 Aceptar mi invitación';
+      }
+    }
+
+    const inviteUrl = buildInviteStartAppUrl(env.BOT_USERNAME, startParam);
+    const htmlText = buildInviteMessageHtml({
+      roomTitle: room.title,
+      maxBudget: room.max_budget,
+      currency: room.currency,
+      revealDate: room.reveal_date,
+      notes: room.notes,
+      recipientName
+    });
+
+    const prepared = await savePreparedInlineMessage(env.BOT_TOKEN, {
+      userId: user.id,
+      resultId: `invite_${room.code}_${Date.now()}`,
+      title: `Invitación: ${room.title}`,
+      description: `Día: ${formatRevealDate(room.reveal_date)}`,
+      htmlText,
+      buttonText,
+      buttonUrl: inviteUrl
+    });
+
+    if (prepared.ok) {
+      return json({
+        preparedMessageId: prepared.id,
+        inviteUrl,
+        inlineDisabled: false
+      });
+    }
+
+    return json({
+      preparedMessageId: null,
+      inviteUrl,
+      inlineDisabled: Boolean(prepared.inlineDisabled),
+      error: prepared.description
+    });
+  }
+
+  // PATCH /api/rooms/:code/profile (editar nombre visible, tallas, alergias, no regalar)
+  if (method === 'PATCH' && subpath === '/profile') {
+    const body = await parseBody<{
+      displayName?: string;
+      sizes?: string;
+      allergies?: string;
+      dislikes?: string;
+    }>(request);
+
+    const displayName =
+      body?.displayName !== undefined ? body.displayName.trim() : me.display_name;
+    const sizes = body?.sizes !== undefined ? body.sizes.trim().slice(0, 200) : me.sizes;
+    const allergies =
+      body?.allergies !== undefined ? body.allergies.trim().slice(0, 200) : me.allergies;
+    const dislikes =
+      body?.dislikes !== undefined ? body.dislikes.trim().slice(0, 200) : me.dislikes;
+
+    if (displayName.length < 1 || displayName.length > 60) {
+      return badRequest('Tu nombre visible debe tener entre 1 y 60 caracteres.');
+    }
+
+    const prefsChanged =
+      sizes !== me.sizes || allergies !== me.allergies || dislikes !== me.dislikes;
+
+    await env.DB.prepare(
+      `UPDATE participants
+       SET display_name = ?, sizes = ?, allergies = ?, dislikes = ?
+       WHERE id = ? AND room_id = ?`
+    )
+      .bind(displayName, sizes, allergies, dislikes, me.id, room.id)
+      .run();
+
+    if (prefsChanged) {
+      await notifyGiverOfPreferencesChange(env, room, {
+        ...me,
+        display_name: displayName,
+        sizes,
+        allergies,
+        dislikes
+      });
+    }
+
+    return json({ ok: true });
+  }
+
+  // POST /api/rooms/:code/leave (salir de un sorteo abierto si no eres organizador)
+  if (method === 'POST' && subpath === '/leave') {
+    if (isOrganizer) {
+      return badRequest('Quien organiza no puede salir; puedes eliminar el sorteo si lo deseas.', 403);
+    }
+    if (room.status !== 'open') {
+      return badRequest('No puedes abandonar el sorteo una vez realizado.', 409);
+    }
+
+    await env.DB.batch([
+      env.DB.prepare(
+        'DELETE FROM anonymous_messages WHERE room_id = ? AND (giver_id = ? OR receiver_id = ?)'
+      ).bind(room.id, me.id, me.id),
+      env.DB.prepare(
+        'DELETE FROM exclusions WHERE room_id = ? AND (giver_id = ? OR excluded_receiver_id = ?)'
+      ).bind(room.id, me.id, me.id),
+      env.DB.prepare('DELETE FROM wishlist_items WHERE room_id = ? AND participant_id = ?').bind(
+        room.id,
+        me.id
+      ),
+      env.DB.prepare('DELETE FROM participants WHERE id = ? AND room_id = ?').bind(me.id, room.id)
+    ]);
+
+    return json({ ok: true });
+  }
+
+  // PATCH /api/rooms/:code/gift-status (estado privado del regalo: pending | bought | wrapped)
+  if (method === 'PATCH' && subpath === '/gift-status') {
+    if (room.status === 'open') {
+      return badRequest('Primero debe realizarse el sorteo.', 409);
+    }
+
+    const body = await parseBody<{ giftStatus?: string }>(request);
+    const giftStatus = body?.giftStatus as GiftStatus | undefined;
+    if (giftStatus !== 'pending' && giftStatus !== 'bought' && giftStatus !== 'wrapped') {
+      return badRequest('Estado de regalo no válido.');
+    }
+
+    await env.DB.prepare('UPDATE participants SET gift_status = ? WHERE id = ? AND room_id = ?')
+      .bind(giftStatus, me.id, room.id)
+      .run();
+
+    return json({ ok: true, giftStatus });
+  }
+
+  // POST /api/rooms/:code/chat (mensajería anónima a través del bot)
+  if (method === 'POST' && subpath === '/chat') {
+    if (room.status !== 'drawn') {
+      return badRequest('El chat anónimo solo está disponible mientras el sorteo está en curso.', 409);
+    }
+
+    const body = await parseBody<{ thread?: string; body?: string }>(request);
+    const thread = body?.thread;
+    const messageBody = (body?.body ?? '').trim();
+
+    if (thread !== 'to_target' && thread !== 'to_santa') {
+      return badRequest('Canal de chat no válido.');
+    }
+    if (messageBody.length < 1 || messageBody.length > 400) {
+      return badRequest('El mensaje debe tener entre 1 y 400 caracteres.');
+    }
+
+    let giverRow: ParticipantRow | null = null;
+    let receiverRow: ParticipantRow | null = null;
+    let senderRole: 'giver' | 'receiver';
+
+    if (thread === 'to_target') {
+      if (!me.assigned_to_id) {
+        return badRequest('Aún no tienes amigo invisible asignado.', 400);
+      }
+      giverRow = me;
+      receiverRow = await env.DB.prepare(
+        'SELECT * FROM participants WHERE id = ? AND room_id = ?'
+      )
+        .bind(me.assigned_to_id, room.id)
+        .first<ParticipantRow>();
+      senderRole = 'giver';
+    } else {
+      giverRow = await env.DB.prepare(
+        'SELECT * FROM participants WHERE room_id = ? AND assigned_to_id = ?'
+      )
+        .bind(room.id, me.id)
+        .first<ParticipantRow>();
+      receiverRow = me;
+      senderRole = 'receiver';
+    }
+
+    if (!giverRow || !receiverRow) {
+      return badRequest('No se encontró la pareja de conversación.', 404);
+    }
+
+    const msgId = randomId();
+    const now = new Date().toISOString();
+    await env.DB.prepare(
+      `INSERT INTO anonymous_messages (id, room_id, giver_id, receiver_id, sender_role, body, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(msgId, room.id, giverRow.id, receiverRow.id, senderRole, messageBody, now)
+      .run();
+
+    const recipient = senderRole === 'giver' ? receiverRow : giverRow;
+    if (recipient.telegram_user_id) {
+      const dmHtml =
+        senderRole === 'giver'
+          ? [
+              `🎅 <b>Tu Amigo Invisible en «${escapeHtml(room.title)}» te pregunta:</b>`,
+              '',
+              `«${escapeHtml(messageBody)}»`,
+              '',
+              '<i>Responde de forma anónima desde la Mini App.</i>'
+            ].join('\n')
+          : [
+              `💬 <b>${escapeHtml(me.display_name)} respondió en el chat anónimo de «${escapeHtml(room.title)}»:</b>`,
+              '',
+              `«${escapeHtml(messageBody)}»`
+            ].join('\n');
+
+      const dmBtnLabel =
+        senderRole === 'giver' ? '💬 Responder en la Mini App' : '💬 Ver chat anónimo';
+
+      const res = await sendTelegramMessage(
+        env.BOT_TOKEN,
+        recipient.telegram_user_id,
+        dmHtml,
+        buildStartAppButton(env, dmBtnLabel, `join_${room.code}`)
+      );
+
+      if (res.ok) {
+        await updateBotReachability(env.DB, recipient.telegram_user_id, true);
+      } else if (res.blocked) {
+        await updateBotReachability(env.DB, recipient.telegram_user_id, false);
+      }
+    }
+
+    return json({ id: msgId, createdAt: now }, 201);
+  }
+
+  // POST /api/rooms/:code/reveal (revelación final el día del evento)
+  if (method === 'POST' && subpath === '/reveal') {
+    if (!isOrganizer) {
+      return badRequest('Solo quien organiza puede hacer la revelación final.', 403);
+    }
+    if (room.status !== 'drawn') {
+      return badRequest('El sorteo debe haberse realizado antes de revelarlo.', 409);
+    }
+
+    const { results: participants } = await env.DB.prepare(
+      'SELECT * FROM participants WHERE room_id = ? ORDER BY is_organizer DESC, created_at ASC'
+    )
+      .bind(room.id)
+      .all<ParticipantRow>();
+
+    const now = new Date().toISOString();
+    await env.DB.prepare(
+      "UPDATE rooms SET status = 'revealed', revealed_at = ?, updated_at = ? WHERE id = ?"
+    )
+      .bind(now, now, room.id)
+      .run();
+
+    const byId = new Map(participants.map((p) => [p.id, p]));
+    const pairs = participants
+      .filter((p) => p.assigned_to_id && byId.has(p.assigned_to_id))
+      .map((p) => ({
+        giverName: p.display_name,
+        receiverName: byId.get(p.assigned_to_id!)!.display_name
+      }));
+
+    const revealHtml = buildRevealSummaryHtml({ roomTitle: room.title, pairs });
+    const keyboard = buildStartAppButton(env, '🎉 Ver revelación en la App', `join_${room.code}`);
+
+    let notifiedCount = 0;
+    for (const p of participants) {
+      if (!p.telegram_user_id) continue;
+      const res = await sendTelegramMessage(env.BOT_TOKEN, p.telegram_user_id, revealHtml, keyboard);
+      if (res.ok) {
+        notifiedCount++;
+        await updateBotReachability(env.DB, p.telegram_user_id, true);
+      } else if (res.blocked) {
+        await updateBotReachability(env.DB, p.telegram_user_id, false);
+      }
+    }
+
+    return json({ ok: true, notifiedCount, totalParticipants: participants.length });
   }
 
   return badRequest('Operación no soportada.', 404);

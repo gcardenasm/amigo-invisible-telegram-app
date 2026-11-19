@@ -1,4 +1,4 @@
-import type { RoomDetailDto, RoomSummaryDto } from '../shared/types';
+import type { GiftStatus, RoomDetailDto, RoomSummaryDto } from '../shared/types';
 import { getActiveDevProfile, getTelegramWebApp } from './telegram-sdk';
 
 export interface MeResponse {
@@ -162,6 +162,53 @@ export const api = {
   remindPending: (code: string) =>
     apiFetch<{ sentCount: number; unreachableNames: string[] }>(
       `/api/rooms/${encodeURIComponent(code)}/remind`,
+      { method: 'POST', body: '{}' }
+    ),
+  prepareShareMessage: (code: string, data?: { claimToken?: string }) =>
+    apiFetch<{
+      preparedMessageId: string | null;
+      inviteUrl: string;
+      inlineDisabled?: boolean;
+      error?: string;
+    }>(`/api/rooms/${encodeURIComponent(code)}/share-message`, {
+      method: 'POST',
+      body: JSON.stringify(data ?? {})
+    }),
+  updateProfile: (
+    code: string,
+    data: { displayName?: string; sizes?: string; allergies?: string; dislikes?: string }
+  ) =>
+    apiFetch<{ ok: boolean }>(`/api/rooms/${encodeURIComponent(code)}/profile`, {
+      method: 'PATCH',
+      body: JSON.stringify(data)
+    }),
+  leaveRoom: (code: string) =>
+    apiFetch<{ ok: boolean }>(`/api/rooms/${encodeURIComponent(code)}/leave`, {
+      method: 'POST',
+      body: '{}'
+    }),
+  updateGiftStatus: (code: string, giftStatus: GiftStatus) =>
+    apiFetch<{ ok: boolean; giftStatus: GiftStatus }>(
+      `/api/rooms/${encodeURIComponent(code)}/gift-status`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ giftStatus })
+      }
+    ),
+  sendAnonymousMessage: (
+    code: string,
+    data: { thread: 'to_target' | 'to_santa'; body: string }
+  ) =>
+    apiFetch<{ id: string; createdAt: string }>(
+      `/api/rooms/${encodeURIComponent(code)}/chat`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data)
+      }
+    ),
+  revealRoom: (code: string) =>
+    apiFetch<{ ok: boolean; notifiedCount: number; totalParticipants: number }>(
+      `/api/rooms/${encodeURIComponent(code)}/reveal`,
       { method: 'POST', body: '{}' }
     )
 };

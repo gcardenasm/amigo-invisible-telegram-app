@@ -2,7 +2,10 @@
  * Inicializa diálogos nativos <dialog> con light-dismiss progresivo
  * y reseteo seguro de returnValue tras cerrar.
  */
-export function setupModalDialog(dialog: HTMLDialogElement): void {
+export function setupModalDialog(
+  dialog: HTMLDialogElement,
+  onClose?: (returnValue: string) => void
+): void {
   if (!('closedBy' in HTMLDialogElement.prototype)) {
     let pressedOutside = false;
     const isOutside = (e: PointerEvent) => {
@@ -29,7 +32,9 @@ export function setupModalDialog(dialog: HTMLDialogElement): void {
   }
 
   dialog.addEventListener('close', () => {
+    const value = dialog.returnValue;
     dialog.returnValue = '';
+    onClose?.(value);
   });
 }
 
@@ -88,12 +93,9 @@ export function openConfirmDialog(params: {
     dialog.append(header, p, form);
     document.body.append(dialog);
 
-    setupModalDialog(dialog);
-
-    dialog.addEventListener('close', () => {
-      const confirmed = dialog.returnValue === 'confirm';
+    setupModalDialog(dialog, (value) => {
       dialog.remove();
-      resolve(confirmed);
+      resolve(value === 'confirm');
     });
 
     dialog.showModal();

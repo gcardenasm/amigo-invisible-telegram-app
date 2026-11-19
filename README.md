@@ -8,21 +8,16 @@ Construida con **TypeScript + Vite** en el frontend y **Cloudflare Workers + Clo
 
 ## ✨ Funcionalidades principales
 
-- **Salas de sorteo completas:** configura el nombre del grupo, el **importe máximo** (con moneda elegible: EUR, USD, MXN, ARS, COP, CLP, GBP), el **día de revelación de regalos** y notas del evento.
-- **Invitación nativa a contactos de Telegram:**
-  - Botón directo **«Invitar contactos de Telegram»** usando el selector nativo de Telegram (`t.me/share/url`).
+- **Salas de sorteo completas:** configura el nombre del grupo, el **importe máximo** (con moneda elegible: EUR, USD, MXN, ARS, COP, CLP, GBP), el **día de revelación de regalos**, cuenta atrás en días y notas del evento.
+- **Invitación interactiva a contactos de Telegram:**
+  - Tarjeta interactiva con botón directo **«🎁 Abrir y unirme al sorteo»** (`savePreparedInlineMessage` + `shareMessage` e `inline_query` para invocar el bot en cualquier chat), con respaldo automático vía `t.me/share/url`.
   - Opción para **pre-añadir contactos manualmente** (nombre y `@usuario` opcional) y enviarles un enlace personal para reclamar su plaza.
-  - Indicador en tiempo real por participante para saber quién ya entró y quién tiene **activado el bot** (`✅ Bot activo`) para recibir mensajes privados.
-- **Lista de preferencias de regalo (Wishlist):** cada participante crea y edita su propia lista de deseos (título, notas como talla/color y enlace opcional).
-- **Exclusiones personalizadas:** evita que ciertas personas se regalen entre sí (con opción **mutua**, ideal para parejas o familiares).
-- **Mensajes privados automáticos por el bot:**
-  - Al ejecutar el sorteo, el bot escribe por privado a cada participante indicando a quién le ha tocado regalar, el presupuesto máximo, la fecha de revelación y su lista de deseos.
-  - **Avisos en tiempo real:** si tu amigo invisible añade, edita o borra regalos después del sorteo, el bot te avisa automáticamente por privado.
-  - **Recordatorios y re-sorteo:** envía recordatorios a quien aún no haya rellenado su lista y permite volver a sortear si hace falta.
-- **Seguridad y privacidad:**
-  - Validación criptográfica `HMAC-SHA256` de `initData` de Telegram WebApp mediante Web Crypto API.
-  - Cada participante solo puede consultar su propia asignación (`myTarget`) una vez realizado el sorteo.
-  - Interfaz adaptada automáticamente al tema claro u oscuro de Telegram.
+  - Activación de mensajes privados del bot en 1 toque (`requestWriteAccess`) con indicador en tiempo real (`✅ Bot activo`).
+- **Lista de regalos + perfil rápido de gustos:** cada participante crea su wishlist y puede editar su **nombre visible**, **tallas**, **alergias** y **qué NO regalar**, además de poder salir de la sala antes del sorteo.
+- **Chat anónimo a través del bot:** quien regala puede enviar preguntas anónimas a su amigo invisible y recibir respuesta por privado y dentro de la Mini App sin desvelar su identidad.
+- **Progreso privado del regalo y revelación final:** marca de forma privada si el regalo está *Pendiente*, *Comprado* o *Envuelto* (mostrando un contador anónimo grupal) y desbloquea todos los emparejamientos el día de la entrega con **«Revelar amigos invisibles»**.
+- **Exclusiones y recordatorios automáticos:** evita parejas o familiares en el sorteo y envía recordatorios automáticos por Cron Trigger gratuito (7 días antes, 2 días antes y el mismo día del evento).
+- **Experiencia nativa:** soporte automático de tema claro/oscuro, vibración háptica (`HapticFeedback`) y animaciones accesibles respetando `prefers-reduced-motion`.
 
 ---
 
@@ -41,30 +36,35 @@ Para resolverlo de forma fluida:
 
 ```text
 ├── migrations/
-│   └── 0001_init.sql          # Esquema SQLite para Cloudflare D1
+│   ├── 0001_init.sql          # Esquema inicial SQLite para Cloudflare D1
+│   └── 0002_v2_features.sql   # Perfil de gustos, chat anónimo, progreso y revelación
 ├── src/
 │   ├── shared/
 │   │   ├── types.ts           # Tipos compartidos entre Worker y Mini App
+│   │   ├── countdown.ts       # Cuenta atrás y cálculo de hitos de recordatorio
 │   │   └── draw.ts            # Algoritmo de sorteo con backtracking (MRV) y exclusiones
 │   ├── worker/
-│   │   ├── index.ts           # Entrada del Cloudflare Worker (API + Webhook + Assets)
+│   │   ├── index.ts           # Entrada del Cloudflare Worker (API, Webhook, Assets y Cron)
+│   │   ├── cron.ts            # Recordatorios automáticos diarios (7d, 2d, día D)
 │   │   ├── auth.ts            # Validación HMAC-SHA256 de Telegram initData
-│   │   ├── bot.ts             # Manejador del webhook (/start, /misorteos, deep links)
+│   │   ├── bot.ts             # Manejador del webhook (/start, /misorteos, inline_query)
 │   │   ├── db.ts              # Consultas D1 y lógica de salas/notificaciones
-│   │   ├── routes.ts          # API REST (/api/rooms, wishlist, exclusions, draw, remind)
+│   │   ├── routes.ts          # API REST (/api/rooms, wishlist, chat, profile, reveal)
 │   │   └── telegram.ts        # Cliente ligero de Telegram Bot API
 │   └── web/
 │       ├── index.html         # Mini App HTML con soporte light/dark y SDK de Telegram
 │       ├── styles.css         # Estilos adaptados a Telegram ThemeParams
 │       ├── main.ts            # Arranque, enrutado y BackButton de Telegram
 │       ├── api.ts             # Cliente HTTP tipado
-│       ├── telegram-sdk.ts    # Envoltorio de Telegram.WebApp + modo demo local
+│       ├── telegram-sdk.ts    # Envoltorio de Telegram.WebApp + HapticFeedback + modo demo
 │       ├── validation.ts      # Validación accesible de formularios
 │       ├── dialog.ts          # Modales nativos <dialog> con light-dismiss
 │       └── views/             # Vistas de inicio y detalle de sala
 └── test/
     ├── auth.test.ts           # Tests de verificación criptográfica de initData
-    └── draw.test.ts           # Tests del algoritmo de sorteo y exclusiones
+    ├── countdown.test.ts      # Tests de cuenta atrás y hitos automáticos
+    ├── draw.test.ts           # Tests del algoritmo de sorteo y exclusiones
+    └── telegram.test.ts       # Tests de URLs, mensajes y revelación final
 ```
 
 Sin dependencias de producción en tiempo de ejecución: el Worker empaquetado ocupa ~13 KB comprimido (gzip).
@@ -166,6 +166,7 @@ npx wrangler secret put WEBHOOK_SECRET
    ```
 2. En `@BotFather`:
    - Envía `/mybots` → elige tu bot → **Bot Settings** → **Configure Mini App** → **Enable Mini App** → pega tu `<WEBAPP_URL>`.
+   - Envía `/mybots` → elige tu bot → **Bot Settings** → **Inline Mode** → **Turn on** (habilita la invitación interactiva con botón directo).
    - Envía `/setmenubutton` → elige tu bot → pega tu `<WEBAPP_URL>` → texto del botón: `🎁 Abrir App`.
 
 ---

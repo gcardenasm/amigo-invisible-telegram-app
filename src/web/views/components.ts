@@ -1,6 +1,10 @@
 import { api } from '../api';
 import { setupModalDialog } from '../dialog';
-import { openTelegramBotLink, requestBotWriteAccess } from '../telegram-sdk';
+import {
+  normalizeBotUsernameClient,
+  openTelegramBotLink,
+  requestBotWriteAccess
+} from '../telegram-sdk';
 import { attachAccessibleValidation, validateAndFocusFirstInvalid } from '../validation';
 
 export function escapeHtml(str: string): string {
@@ -61,25 +65,32 @@ export function showToast(message: string): void {
   }, 3200);
 }
 
+export async function tryQuickWriteAccess(roomCode?: string): Promise<boolean> {
+  const allowed = await requestBotWriteAccess();
+  if (!allowed) return false;
+  try {
+    const res = await api.pingBot(roomCode);
+    if (res.reachable) {
+      showToast('✅ Avisos del bot activados');
+      return true;
+    }
+  } catch {
+    // Si falla el ping silencioso, el botón manual sigue disponible
+  }
+  return false;
+}
+
 export async function activateBotMessages(
   botUsername: string,
   roomCode?: string
 ): Promise<boolean> {
-  const allowed = await requestBotWriteAccess();
-  if (allowed) {
-    try {
-      const res = await api.pingBot(roomCode);
-      if (res.reachable) {
-        showToast('✅ Avisos del bot activados');
-        return true;
-      }
-    } catch {
-      // Fallback al enlace /start del bot
-    }
+  if (await tryQuickWriteAccess(roomCode)) {
+    return true;
   }
 
+  const cleanUsername = normalizeBotUsernameClient(botUsername);
   const payload = roomCode ? `verify_${roomCode}` : 'start';
-  openTelegramBotLink(`https://t.me/${botUsername}?start=${encodeURIComponent(payload)}`);
+  openTelegramBotLink(`https://t.me/${cleanUsername}?start=${encodeURIComponent(payload)}`);
   showToast('Pulsa "Iniciar" en el chat del bot y vuelve aquí');
   return false;
 }
