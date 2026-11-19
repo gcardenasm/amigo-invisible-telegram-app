@@ -210,5 +210,14 @@ export const api = {
     apiFetch<{ ok: boolean; notifiedCount: number; totalParticipants: number }>(
       `/api/rooms/${encodeURIComponent(code)}/reveal`,
       { method: 'POST', body: '{}' }
-    )
+    ),
+  announceGroup: (code: string) =>
+    apiFetch<{ ok: boolean }>(`/api/rooms/${encodeURIComponent(code)}/announce-group`, {
+      method: 'POST',
+      body: '{}'
+    }),
+  unlinkGroup: (code: string) =>
+    apiFetch<{ ok: boolean }>(`/api/rooms/${encodeURIComponent(code)}/group`, {
+      method: 'DELETE'
+    })
 };

@@ -1,5 +1,11 @@
 import { computeDaysUntilReveal, getAutoReminderMilestone } from '../shared/countdown';
-import { buildStartAppButton, updateBotReachability, type ParticipantRow, type RoomRow } from './db';
+import {
+  buildStartAppButton,
+  sendGroupStatusAnnouncement,
+  updateBotReachability,
+  type ParticipantRow,
+  type RoomRow
+} from './db';
 import type { Env } from './env';
 import { escapeHtml, formatBudget, formatRevealDate, sendTelegramMessage } from './telegram';
 
@@ -79,6 +85,16 @@ export async function handleScheduledReminders(
       } else if (res.blocked) {
         await updateBotReachability(env.DB, p.telegram_user_id, false);
       }
+    }
+
+    if (room.linked_group_id !== null) {
+      const groupHeadline =
+        milestone === 0
+          ? `🎉 <b>¡Hoy es la revelación de «${escapeHtml(room.title)}»!</b>`
+          : `⏳ <b>Faltan ${milestone === 7 ? '7 días' : '2 días'} para «${escapeHtml(
+              room.title
+            )}»</b>`;
+      await sendGroupStatusAnnouncement(env, room, groupHeadline);
     }
   }
 }

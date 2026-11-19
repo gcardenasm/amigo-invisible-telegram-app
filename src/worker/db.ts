@@ -1,3 +1,4 @@
+import { computeDaysUntilReveal, formatCountdownLabel } from '../shared/countdown';
 import type {
   AnonymousMessageDto,
   ExclusionDto,
@@ -13,7 +14,10 @@ import { formatDisplayName } from './auth';
 import type { Env, TelegramUser } from './env';
 import {
   buildAssignmentMessageHtml,
+  buildInviteStartAppUrl,
   escapeHtml,
+  formatBudget,
+  formatRevealDate,
   normalizeBotUsername,
   sendTelegramMessage,
   type InlineButton
@@ -67,6 +71,10 @@ export function buildStartAppButton(env: Env, label: string, startParam: string)
   return [[{ text: label, web_app: { url: buildMiniAppUrl(env, startParam) } }]];
 }
 
+export function buildGroupAppButton(env: Env, label: string, startParam: string): InlineButton[][] {
+  return [[{ text: label, url: buildInviteStartAppUrl(env.BOT_USERNAME, startParam) }]];
+}
+
 export interface RoomRow {
   id: string;
   code: string;
@@ -80,6 +88,8 @@ export interface RoomRow {
   drawn_at: string | null;
   revealed_at: string | null;
   last_reminder_days: number | null;
+  linked_group_id: number | null;
+  linked_group_title: string;
   created_at: string;
   updated_at: string;
 }
@@ -546,6 +556,8 @@ export async function buildRoomDetailDto(
     status: room.status,
     participantCount: participantRows.length,
     giftsReadyCount,
+    hasLinkedGroup: room.linked_group_id !== null,
+    linkedGroupTitle: room.linked_group_title ?? '',
     isOrganizer,
     myBotReachable: me.bot_reachable === 1,
     drawnAt: room.drawn_at,
@@ -667,4 +679,85 @@ export async function notifyGiverOfWishlistChange(
   } else if (res.blocked) {
     await updateBotReachability(env.DB, giver.telegram_user_id, false);
   }
+}
+
+export async function sendGroupStatusAnnouncement(
+  env: Env,
+  room: RoomRow,
+  headline?: string
+): Promise<{ ok: boolean; error?: string }> {
+  if (!room.linked_group_id) {
+    return { ok: false, error: 'No hay ningún grupo de Telegram vinculado.' };
+  }
+
+  const { results: participants } = await env.DB.prepare(
+    'SELECT * FROM participants WHERE room_id = ? ORDER BY is_organizer DESC, created_at ASC'
+  )
+    .bind(room.id)
+    .all<ParticipantRow>();
+
+  const { results: wishCounts } = await env.DB.prepare(
+    'SELECT participant_id, COUNT(*) as count FROM wishlist_items WHERE room_id = ? GROUP BY participant_id'
+  )
+    .bind(room.id)
+    .all<{ participant_id: string; count: number }>();
+
+  const wishMap = new Map(wishCounts.map((w) => [w.participant_id, w.count]));
+  const countdown = formatCountdownLabel(computeDaysUntilReveal(room.reveal_date));
+
+  const formatMention = (p: ParticipantRow) =>
+    p.telegram_username ? `${escapeHtml(p.display_name)} (@${escapeHtml(p.telegram_username)})` : escapeHtml(p.display_name);
+
+  const pendingJoinOrBot = participants.filter(
+    (p) => p.telegram_user_id === null || p.bot_reachable === 0
+  );
+  const pendingWishlist = participants.filter((p) => (wishMap.get(p.id) ?? 0) === 0);
+  const readyCount = participants.filter(
+    (p) => p.gift_status === 'bought' || p.gift_status === 'wrapped'
+  ).length;
+
+  const lines = [
+    headline || `📢 <b>Recordatorio de «${escapeHtml(room.title)}»</b>`,
+    '',
+    `📅 <b>Día de revelación:</b> ${escapeHtml(formatRevealDate(room.reveal_date))}${
+      countdown ? ` (${escapeHtml(countdown)})` : ''
+    }`,
+    `💰 <b>Importe máximo:</b> ${escapeHtml(formatBudget(room.max_budget, room.currency))}`,
+    `👥 <b>Participantes:</b> ${participants.length}`
+  ];
+
+  if (room.status === 'drawn') {
+    lines.push(`🎁 <b>Regalos preparados:</b> ${readyCount} de ${participants.length}`);
+  }
+
+  if (pendingJoinOrBot.length > 0) {
+    lines.push(
+      '',
+      `⚠️ <b>Faltan por entrar o activar el bot (${pendingJoinOrBot.length}):</b> ${pendingJoinOrBot
+        .map(formatMention)
+        .join(', ')}`
+    );
+  }
+
+  if (pendingWishlist.length > 0) {
+    lines.push(
+      '',
+      `📝 <b>Aún sin lista de regalos (${pendingWishlist.length}):</b> ${pendingWishlist
+        .map(formatMention)
+        .join(', ')}`
+    );
+  }
+
+  if (pendingJoinOrBot.length === 0 && pendingWishlist.length === 0) {
+    lines.push('', '✅ ¡Todo el grupo está conectado al bot y con su lista de regalos lista!');
+  }
+
+  const res = await sendTelegramMessage(
+    env.BOT_TOKEN,
+    room.linked_group_id,
+    lines.join('\n'),
+    buildGroupAppButton(env, '🎁 Abrir Amigo Invisible', `join_${room.code}`)
+  );
+
+  return res.ok ? { ok: true } : { ok: false, error: res.description };
 }

@@ -613,6 +613,31 @@ export async function renderRoomView(
         <button type="button" id="btn-edit-room" class="btn-secondary btn-sm">✏️ Editar evento</button>
         <button type="button" id="btn-delete-room" class="btn-danger btn-sm">🗑️ Eliminar sorteo</button>
       </div>
+      <div style="border-top:1px solid var(--border);padding-top:0.75rem;display:flex;flex-direction:column;gap:0.5rem;">
+        <div class="section-header">
+          <strong style="font-size:0.92rem;">👥 Grupo de Telegram vinculado</strong>
+          <span class="badge ${room.hasLinkedGroup ? 'badge-success' : 'badge-neutral'}">
+            ${room.hasLinkedGroup ? escapeHtml(room.linkedGroupTitle || 'Vinculado') : 'Sin vincular'}
+          </span>
+        </div>
+        ${
+          room.hasLinkedGroup
+            ? `
+          <div class="btn-row">
+            <button type="button" id="btn-announce-group" class="btn-secondary btn-sm">📢 Avisar al grupo ahora</button>
+            <button type="button" id="btn-unlink-group" class="btn-danger btn-sm">Desvincular grupo</button>
+          </div>`
+            : `
+          <div class="muted">
+            Para que el bot avise en vuestro grupo de la cuenta atrás y de quién falta, mete a <strong>@${escapeHtml(
+              cleanBotUsername
+            )}</strong> en el grupo y escribe: <code>/vincular ${escapeHtml(room.code)}</code>
+          </div>
+          <button type="button" id="btn-copy-link-cmd" class="btn-secondary btn-sm" style="align-self:flex-start;">
+            📋 Copiar /vincular ${escapeHtml(room.code)}
+          </button>`
+        }
+      </div>
     </section>`
     : room.status === 'open'
     ? `
@@ -1069,6 +1094,46 @@ export async function renderRoomView(
       }
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Error enviando recordatorios');
+    }
+  });
+
+  container.querySelector('#btn-copy-link-cmd')?.addEventListener('click', async () => {
+    const cmd = `/vincular ${room.code}`;
+    try {
+      await navigator.clipboard.writeText(cmd);
+      showToast(`📋 Copiado: ${cmd}`);
+    } catch {
+      showToast(cmd);
+    }
+  });
+
+  container.querySelector('#btn-announce-group')?.addEventListener('click', async () => {
+    try {
+      await api.announceGroup(room.code);
+      hapticNotification('success');
+      showToast('📢 Aviso enviado al grupo');
+    } catch (err) {
+      hapticNotification('error');
+      showToast(err instanceof Error ? err.message : 'No se pudo avisar al grupo');
+    }
+  });
+
+  container.querySelector('#btn-unlink-group')?.addEventListener('click', async () => {
+    const ok = await openConfirmDialog({
+      title: '¿Desvincular el grupo de Telegram?',
+      description: 'El bot dejará de publicar recordatorios y avisos en ese grupo.',
+      confirmLabel: 'Desvincular',
+      destructive: true
+    });
+    if (!ok) return;
+    try {
+      await api.unlinkGroup(room.code);
+      hapticImpact('light');
+      showToast('Grupo desvinculado');
+      await reload();
+    } catch (err) {
+      hapticNotification('error');
+      showToast(err instanceof Error ? err.message : 'No se pudo desvincular');
     }
   });
 

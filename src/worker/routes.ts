@@ -2,6 +2,7 @@ import { computeSecretSantaDraw } from '../shared/draw';
 import type { GiftStatus, RoomSummaryDto } from '../shared/types';
 import { authenticateRequest, formatDisplayName } from './auth';
 import {
+  buildGroupAppButton,
   buildRoomDetailDto,
   buildStartAppButton,
   joinRoomOrClaimSlot,
@@ -11,6 +12,7 @@ import {
   randomId,
   sanitizeUrl,
   sendAssignmentDm,
+  sendGroupStatusAnnouncement,
   updateBotReachability,
   upsertKnownBotUser,
   type ParticipantRow,
@@ -121,6 +123,7 @@ export async function handleApiRequest(
                 r.currency as r_currency, r.reveal_date as r_reveal_date, r.notes as r_notes,
                 r.organizer_tg_id as r_organizer_tg_id, r.status as r_status, r.drawn_at as r_drawn_at,
                 r.revealed_at as r_revealed_at, r.last_reminder_days as r_last_reminder_days,
+                r.linked_group_id as r_linked_group_id, r.linked_group_title as r_linked_group_title,
                 r.created_at as r_created_at, r.updated_at as r_updated_at
          FROM participants p
          INNER JOIN rooms r ON r.id = p.room_id
@@ -140,6 +143,8 @@ export async function handleApiRequest(
             r_drawn_at: string | null;
             r_revealed_at: string | null;
             r_last_reminder_days: number | null;
+            r_linked_group_id: number | null;
+            r_linked_group_title: string;
             r_created_at: string;
             r_updated_at: string;
           }
@@ -161,6 +166,8 @@ export async function handleApiRequest(
             drawn_at: row.r_drawn_at,
             revealed_at: row.r_revealed_at,
             last_reminder_days: row.r_last_reminder_days,
+            linked_group_id: row.r_linked_group_id,
+            linked_group_title: row.r_linked_group_title ?? '',
             created_at: row.r_created_at,
             updated_at: row.r_updated_at
           },
@@ -210,6 +217,8 @@ export async function handleApiRequest(
       status: r.status,
       participantCount: r.participant_count,
       giftsReadyCount: r.gifts_ready_count,
+      hasLinkedGroup: r.linked_group_id !== null,
+      linkedGroupTitle: r.linked_group_title ?? '',
       isOrganizer: r.organizer_tg_id === user.id || r.me_org === 1,
       myBotReachable: r.me_bot === 1,
       drawnAt: r.drawn_at,
@@ -709,6 +718,30 @@ export async function handleApiRequest(
       }
     }
 
+    if (updatedRoom.linked_group_id !== null) {
+      const groupLines = [
+        isRedraw
+          ? `🔄 <b>¡Nuevo sorteo realizado en «${escapeHtml(room.title)}»!</b>`
+          : `🎲 <b>¡Sorteo realizado en «${escapeHtml(room.title)}»!</b>`,
+        '',
+        'Revisad vuestro chat privado con el bot para ver a quién regaláis y su lista de deseos.'
+      ];
+      if (pendingParticipants.length > 0) {
+        groupLines.push(
+          '',
+          `⚠️ <b>Aún deben abrir el bot para recibir su pareja:</b> ${pendingParticipants
+            .map(escapeHtml)
+            .join(', ')}`
+        );
+      }
+      await sendTelegramMessage(
+        env.BOT_TOKEN,
+        updatedRoom.linked_group_id,
+        groupLines.join('\n'),
+        buildGroupAppButton(env, '🎁 Ver mi Amigo Invisible', `join_${room.code}`)
+      );
+    }
+
     return json({
       ok: true,
       notifiedCount,
@@ -1067,7 +1100,41 @@ export async function handleApiRequest(
       }
     }
 
+    if (room.linked_group_id !== null) {
+      await sendTelegramMessage(
+        env.BOT_TOKEN,
+        room.linked_group_id,
+        revealHtml,
+        buildGroupAppButton(env, '🎉 Ver en la Mini App', `join_${room.code}`)
+      );
+    }
+
     return json({ ok: true, notifiedCount, totalParticipants: participants.length });
+  }
+
+  // POST /api/rooms/:code/announce-group (aviso manual al grupo vinculado)
+  if (method === 'POST' && subpath === '/announce-group') {
+    if (!isOrganizer) {
+      return badRequest('Solo quien organiza puede enviar avisos al grupo.', 403);
+    }
+    const res = await sendGroupStatusAnnouncement(env, room);
+    if (!res.ok) {
+      return badRequest(res.error || 'No se pudo enviar el aviso al grupo.', 400);
+    }
+    return json({ ok: true });
+  }
+
+  // DELETE /api/rooms/:code/group (desvincular grupo de Telegram)
+  if (method === 'DELETE' && subpath === '/group') {
+    if (!isOrganizer) {
+      return badRequest('Solo quien organiza puede desvincular el grupo.', 403);
+    }
+    await env.DB.prepare(
+      "UPDATE rooms SET linked_group_id = NULL, linked_group_title = '', updated_at = ? WHERE id = ?"
+    )
+      .bind(new Date().toISOString(), room.id)
+      .run();
+    return json({ ok: true });
   }
 
   return badRequest('Operación no soportada.', 404);

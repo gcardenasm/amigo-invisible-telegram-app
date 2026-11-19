@@ -63,6 +63,8 @@ export interface RoomSummaryDto {
   status: RoomStatus;
   participantCount: number;
   giftsReadyCount: number;
+  hasLinkedGroup: boolean;
+  linkedGroupTitle: string;
   isOrganizer: boolean;
   myBotReachable: boolean;
   drawnAt: string | null;

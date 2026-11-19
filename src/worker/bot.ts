@@ -1,7 +1,9 @@
 import {
+  buildGroupAppButton,
   buildStartAppButton,
   joinRoomOrClaimSlot,
   sendAssignmentDm,
+  sendGroupStatusAnnouncement,
   upsertKnownBotUser,
   type ParticipantRow,
   type RoomRow
@@ -34,6 +36,7 @@ interface TgUpdate {
     chat: {
       id: number;
       type: string;
+      title?: string;
     };
     text?: string;
   };
@@ -147,7 +150,120 @@ export async function handleTelegramWebhook(
   }
 
   const msg = update.message;
-  if (!msg || !msg.from || msg.chat.type !== 'private') {
+  if (!msg || !msg.from) {
+    return new Response('ok');
+  }
+
+  const text = (msg.text ?? '').trim();
+  const [commandRaw, payloadRaw] = text.split(/\s+/, 2);
+  const command = (commandRaw ?? '').split('@')[0]?.toLowerCase() ?? '';
+  const payload = (payloadRaw ?? '').trim();
+
+  // Comandos dentro de un grupo de Telegram (requiere Allow Groups activado en @BotFather)
+  if (msg.chat.type === 'group' || msg.chat.type === 'supergroup') {
+    if (command === '/vincular') {
+      const code = payload.toUpperCase();
+      if (!code) {
+        await sendTelegramMessage(
+          env.BOT_TOKEN,
+          msg.chat.id,
+          'ℹ️ Indica el código del sorteo para vincular este grupo. Ejemplo:\n<code>/vincular A7K9M2P4</code>'
+        );
+        return new Response('ok');
+      }
+
+      const room = await env.DB.prepare('SELECT * FROM rooms WHERE code = ?')
+        .bind(code)
+        .first<RoomRow>();
+      if (!room) {
+        await sendTelegramMessage(
+          env.BOT_TOKEN,
+          msg.chat.id,
+          `⚠️ No existe ningún sorteo con el código <code>${escapeHtml(code)}</code>.`
+        );
+        return new Response('ok');
+      }
+
+      if (room.organizer_tg_id !== msg.from.id) {
+        await sendTelegramMessage(
+          env.BOT_TOKEN,
+          msg.chat.id,
+          '⛔ Solo la persona que creó el sorteo puede vincularlo a este grupo.'
+        );
+        return new Response('ok');
+      }
+
+      const groupTitle = (msg.chat.title ?? 'Grupo de Telegram').slice(0, 80);
+      await env.DB.prepare(
+        'UPDATE rooms SET linked_group_id = ?, linked_group_title = ?, updated_at = ? WHERE id = ?'
+      )
+        .bind(msg.chat.id, groupTitle, new Date().toISOString(), room.id)
+        .run();
+
+      await sendTelegramMessage(
+        env.BOT_TOKEN,
+        msg.chat.id,
+        [
+          `✅ <b>¡Grupo vinculado al Amigo Invisible «${escapeHtml(room.title)}»!</b>`,
+          '',
+          'Por aquí os avisaré de la cuenta atrás, de quién falta por añadir su lista y de la revelación final.',
+          'Podéis consultar quién falta en cualquier momento escribiendo <code>/estado</code>.'
+        ].join('\n'),
+        buildGroupAppButton(env, '🎁 Abrir y unirme al sorteo', `join_${room.code}`)
+      );
+      return new Response('ok');
+    }
+
+    if (command === '/desvincular') {
+      const room = await env.DB.prepare('SELECT * FROM rooms WHERE linked_group_id = ?')
+        .bind(msg.chat.id)
+        .first<RoomRow>();
+      if (!room) {
+        return new Response('ok');
+      }
+      if (room.organizer_tg_id !== msg.from.id) {
+        await sendTelegramMessage(
+          env.BOT_TOKEN,
+          msg.chat.id,
+          '⛔ Solo quien organiza el sorteo puede desvincular este grupo.'
+        );
+        return new Response('ok');
+      }
+      await env.DB.prepare(
+        "UPDATE rooms SET linked_group_id = NULL, linked_group_title = '', updated_at = ? WHERE id = ?"
+      )
+        .bind(new Date().toISOString(), room.id)
+        .run();
+      await sendTelegramMessage(
+        env.BOT_TOKEN,
+        msg.chat.id,
+        `🔓 Grupo desvinculado de «${escapeHtml(room.title)}».`
+      );
+      return new Response('ok');
+    }
+
+    if (command === '/estado' || command === '/pendientes' || command === '/recordar') {
+      const room = await env.DB.prepare(
+        'SELECT * FROM rooms WHERE linked_group_id = ? ORDER BY updated_at DESC LIMIT 1'
+      )
+        .bind(msg.chat.id)
+        .first<RoomRow>();
+      if (!room) {
+        await sendTelegramMessage(
+          env.BOT_TOKEN,
+          msg.chat.id,
+          'ℹ️ Este grupo aún no está vinculado a ningún sorteo. El organizador puede vincularlo escribiendo <code>/vincular CODIGO</code>.'
+        );
+        return new Response('ok');
+      }
+      await sendGroupStatusAnnouncement(env, room);
+      return new Response('ok');
+    }
+
+    return new Response('ok');
+  }
+
+  if (msg.chat.type !== 'private') {
     return new Response('ok');
   }
 
@@ -158,11 +274,6 @@ export async function handleTelegramWebhook(
 
   // Cualquier mensaje privado al bot significa que podemos escribirle
   await upsertKnownBotUser(env.DB, tgUser, true);
-
-  const text = (msg.text ?? '').trim();
-  const [commandRaw, payloadRaw] = text.split(/\s+/, 2);
-  const command = (commandRaw ?? '').split('@')[0]?.toLowerCase() ?? '';
-  const payload = (payloadRaw ?? '').trim();
 
   if (command === '/start' && payload) {
     if (payload.startsWith('join_')) {
@@ -308,6 +419,7 @@ async function sendPendingAssignmentIfAny(env: Env, telegramUserId: number): Pro
             r.currency as r_currency, r.reveal_date as r_reveal_date, r.notes as r_notes,
             r.organizer_tg_id as r_organizer_tg_id, r.status as r_status, r.drawn_at as r_drawn_at,
             r.revealed_at as r_revealed_at, r.last_reminder_days as r_last_reminder_days,
+            r.linked_group_id as r_linked_group_id, r.linked_group_title as r_linked_group_title,
             r.created_at as r_created_at, r.updated_at as r_updated_at
      FROM participants p
      INNER JOIN rooms r ON r.id = p.room_id
@@ -328,6 +440,8 @@ async function sendPendingAssignmentIfAny(env: Env, telegramUserId: number): Pro
         r_drawn_at: string | null;
         r_revealed_at: string | null;
         r_last_reminder_days: number | null;
+        r_linked_group_id: number | null;
+        r_linked_group_title: string;
         r_created_at: string;
         r_updated_at: string;
       }
@@ -347,6 +461,8 @@ async function sendPendingAssignmentIfAny(env: Env, telegramUserId: number): Pro
       drawn_at: row.r_drawn_at,
       revealed_at: row.r_revealed_at,
       last_reminder_days: row.r_last_reminder_days,
+      linked_group_id: row.r_linked_group_id,
+      linked_group_title: row.r_linked_group_title ?? '',
       created_at: row.r_created_at,
       updated_at: row.r_updated_at
     };
